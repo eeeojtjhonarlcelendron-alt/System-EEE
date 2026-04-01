@@ -163,24 +163,47 @@ function ScanQR() {
   }, [scanning])
 
   const onScanSuccess = async (decodedText) => {
+    // Ignore URLs and non-JSON QR codes
+    if (decodedText.startsWith('http') || decodedText.startsWith('www')) {
+      console.log('Ignored URL QR code:', decodedText.substring(0, 30))
+      return
+    }
+
     try {
       const qrData = JSON.parse(decodedText)
+      
+      // Validate it's a fuel request QR code
+      if (!qrData.qr_code || !qrData.request_id) {
+        console.log('Ignored non-fuel QR code')
+        return
+      }
+      
       setScannedData(qrData)
       
-      // Fetch full request details
+      // Fetch full request details by qr_code
       const { data, error } = await supabase
         .from('fuel_requests')
-        .select(`
-          *,
-          vehicles (plate_number, driver_name, department)
-        `)
-        .eq('id', qrData.request_id)
+        .select('*')
+        .eq('qr_code', qrData.qr_code)
         .single()
 
       if (error) throw error
       
+      // Check if fully used (no remaining credits)
+      const remainingCredits = data.remaining_credits ?? data.liters
+      if (data.status === 'used' && remainingCredits === 0) {
+        toast.error('This QR code has already been fully used!')
+        return
+      }
+      
+      // Check if expired
+      if (new Date(data.expires_at) < new Date()) {
+        toast.error('This QR code has expired!')
+        return
+      }
+      
       setRequestDetails(data)
-      setFuelGiven(data.liters.toString())
+      setFuelGiven('0')
       setScanning(false)
 
       // Stop scanner
@@ -189,8 +212,13 @@ function ScanQR() {
         scannerRef.current = null
       }
     } catch (error) {
+      // Only show error if it's not a parsing error (which means wrong QR type)
+      if (error instanceof SyntaxError) {
+        console.log('Ignored non-JSON QR code:', decodedText.substring(0, 30))
+        return
+      }
       console.error('Error processing QR:', error)
-      toast.error('Invalid QR Code')
+      toast.error('Invalid QR Code or not found in database')
     }
   }
 
@@ -203,13 +231,6 @@ function ScanQR() {
 
     setLoading(true)
     try {
-      // Check if already used
-      if (requestDetails.status === 'used') {
-        toast.error('This QR code has already been used!')
-        setLoading(false)
-        return
-      }
-
       // Check if expired
       if (new Date(requestDetails.expires_at) < new Date()) {
         toast.error('This QR code has expired!')
@@ -217,13 +238,43 @@ function ScanQR() {
         return
       }
 
-      // Update fuel request status
+      // Ensure Gas Staff user exists in users table
+      const { data: existingUser } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', user.id)
+        .maybeSingle()
+
+      if (!existingUser) {
+        const { error: userError } = await supabase
+          .from('users')
+          .insert([{
+            id: user.id,
+            email: user.email,
+            name: user.name || user.email,
+            role: user.role || 'gas_staff'
+          }])
+        
+        if (userError) {
+          console.error('Error creating user record:', userError)
+          throw new Error('Failed to create user record. Please contact admin.')
+        }
+      }
+
+      // Calculate remaining credits
+      const currentCredits = requestDetails.remaining_credits ?? requestDetails.liters
+      const remainingCredits = Math.max(0, currentCredits - parseFloat(fuelGiven))
+      const isFullyUsed = remainingCredits === 0
+
+      // Update fuel request - only mark as used if credits are fully depleted
       const { error: updateError } = await supabase
         .from('fuel_requests')
         .update({
-          status: 'used',
-          date_used: new Date().toISOString(),
-          verified_by: user?.id
+          status: isFullyUsed ? 'used' : 'unused',
+          remaining_credits: remainingCredits,
+          ...(isFullyUsed && { date_used: new Date().toISOString() }),
+          last_verified_by: user?.id,
+          last_verified_at: new Date().toISOString()
         })
         .eq('id', requestDetails.id)
 
@@ -241,7 +292,10 @@ function ScanQR() {
 
       if (transactionError) throw transactionError
 
-      toast.success('Fuel dispensed successfully!')
+      toast.success(isFullyUsed 
+        ? 'Fuel dispensed successfully! Credits fully used.' 
+        : `Fuel dispensed! ${remainingCredits} Liters remaining.`
+      )
       
       // Reset
       setScannedData(null)
@@ -319,32 +373,32 @@ function ScanQR() {
         <div className="max-w-lg mx-auto">
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <div className="flex items-center gap-3 mb-6">
-              <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                requestDetails.status === 'unused' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
-              }`}>
-                {requestDetails.status === 'unused' ? <CheckCircle className="w-6 h-6" /> : <AlertCircle className="w-6 h-6" />}
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">
-                  {requestDetails.status === 'unused' ? 'Valid QR Code' : 'QR Code Already Used'}
-                </h3>
-                <p className="text-sm text-gray-500">Status: {requestDetails.status}</p>
-              </div>
+              {(() => {
+                const hasCredits = (requestDetails.remaining_credits ?? requestDetails.liters) > 0
+                return (
+                  <>
+                    <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
+                      hasCredits ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
+                    }`}>
+                      {hasCredits ? <CheckCircle className="w-6 h-6" /> : <AlertCircle className="w-6 h-6" />}
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        {hasCredits ? 'Valid QR Code' : 'QR Code Fully Used'}
+                      </h3>
+                      <p className="text-sm text-gray-500">Credits: {requestDetails.remaining_credits ?? requestDetails.liters} Liters</p>
+                    </div>
+                  </>
+                )
+              })()}
             </div>
 
             <div className="space-y-4 mb-6">
               <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
                 <Car className="w-5 h-5 text-gray-400" />
                 <div>
-                  <p className="text-sm text-gray-500">Vehicle</p>
-                  <p className="font-medium text-gray-900">{requestDetails.vehicles?.plate_number}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                <User className="w-5 h-5 text-gray-400" />
-                <div>
-                  <p className="text-sm text-gray-500">Driver</p>
-                  <p className="font-medium text-gray-900">{requestDetails.vehicles?.driver_name}</p>
+                  <p className="text-sm text-gray-500">Vehicle Type</p>
+                  <p className="font-medium text-gray-900">{requestDetails.vehicle_type?.replace('_', ' ')}</p>
                 </div>
               </div>
               <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
@@ -357,48 +411,58 @@ function ScanQR() {
               <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
                 <Fuel className="w-5 h-5 text-gray-400" />
                 <div>
-                  <p className="text-sm text-gray-500">Requested Amount</p>
-                  <p className="font-medium text-gray-900">{requestDetails.liters} Liters</p>
+                  <p className="text-sm text-gray-500">Credits</p>
+                  <p className="font-medium text-gray-900">
+                    {requestDetails.remaining_credits ?? requestDetails.liters} Liters
+                  </p>
                 </div>
               </div>
             </div>
 
-            {requestDetails.status === 'unused' && (
-              <>
-                <div className="mb-6">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Actual Fuel Given (Liters)
-                  </label>
-                  <input
-                    type="number"
-                    value={fuelGiven}
-                    onChange={(e) => setFuelGiven(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                    placeholder="Enter liters dispensed"
-                    min="0"
-                    step="0.01"
-                  />
-                </div>
+            {(() => {
+              const hasCredits = (requestDetails.remaining_credits ?? requestDetails.liters) > 0
+              return hasCredits ? (
+                <>
+                  <div className="mb-6">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Actual Fuel Given (Liters)
+                    </label>
+                    <input
+                      type="number"
+                      value={fuelGiven}
+                      onChange={(e) => setFuelGiven(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                      placeholder="Enter liters dispensed"
+                      min="0"
+                      max={requestDetails.remaining_credits ?? requestDetails.liters}
+                      step="0.01"
+                    />
+                  </div>
 
-                <button
-                  onClick={handleVerify}
-                  disabled={loading || !fuelGiven}
-                  className="w-full bg-green-600 text-white py-4 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  {loading ? (
-                    <>
-                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      Processing...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle className="w-5 h-5" />
-                      Confirm & Dispense Fuel
-                    </>
-                  )}
-                </button>
-              </>
-            )}
+                  <button
+                    onClick={handleVerify}
+                    disabled={loading || !fuelGiven}
+                    className="w-full bg-green-600 text-white py-4 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {loading ? (
+                      <>
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        Processing...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-5 h-5" />
+                        Confirm & Dispense Fuel
+                      </>
+                    )}
+                  </button>
+                </>
+              ) : (
+                <div className="text-center p-4 bg-red-50 rounded-lg">
+                  <p className="text-red-600 font-medium">This QR code has been fully used.</p>
+                </div>
+              )
+            })()}
 
             <button
               onClick={resetScanner}

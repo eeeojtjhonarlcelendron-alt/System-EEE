@@ -8,22 +8,45 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Check active session
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    console.log('AuthContext: Checking session on mount...')
+    
+    // First check localStorage as a fallback
+    const storedUser = localStorage.getItem('fuel-management-user')
+    if (storedUser) {
+      try {
+        const parsedUser = JSON.parse(storedUser)
+        if (parsedUser?.id) {
+          console.log('AuthContext: Restoring user from localStorage:', parsedUser)
+          setUser(parsedUser)
+          setLoading(false)
+        }
+      } catch (e) {
+        console.error('AuthContext: Error parsing stored user:', e)
+        localStorage.removeItem('fuel-management-user')
+      }
+    }
+    
+    // Then check Supabase session (this will override localStorage if session exists)
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      console.log('AuthContext: getSession result:', { session, error })
       if (session?.user) {
+        console.log('AuthContext: Found session, fetching profile for:', session.user.id)
         fetchUserProfile(session.user.id, session.user)
-      } else {
+      } else if (!storedUser) {
+        console.log('AuthContext: No session found and no stored user')
         setLoading(false)
       }
     })
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        fetchUserProfile(session.user.id, session.user)
-      } else {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log('AuthContext: onAuthStateChange:', event, session?.user?.id)
+      if (event === 'SIGNED_OUT') {
         setUser(null)
+        localStorage.removeItem('fuel-management-user')
         setLoading(false)
+      } else if (session?.user) {
+        fetchUserProfile(session.user.id, session.user)
       }
     })
 
@@ -104,6 +127,7 @@ export function AuthProvider({ children }) {
       // If sign in successful
       if (!signInError && signInData?.user) {
         console.log('Sign in successful')
+        localStorage.setItem('fuel-management-user', JSON.stringify(dbUser))
         setUser(dbUser)
         return { success: true }
       }
@@ -131,6 +155,21 @@ export function AuthProvider({ children }) {
         // Update the database user with the new Auth ID from Supabase
         if (signUpData?.user) {
           console.log('Updating user ID in database...')
+          
+          // First check if a user with this Auth ID already exists
+          const { data: existingUser, error: checkError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', signUpData.user.id)
+            .maybeSingle()
+          
+          if (existingUser) {
+            console.log('User with Auth ID already exists, using that user:', existingUser)
+            setUser(existingUser)
+            return { success: true }
+          }
+          
+          // Otherwise update the database user
           const { error: updateError } = await supabase
             .from('users')
             .update({ id: signUpData.user.id })
@@ -138,9 +177,15 @@ export function AuthProvider({ children }) {
 
           if (updateError) {
             console.error('Error updating user ID:', updateError)
+            // Still use the database user we found earlier
+            localStorage.setItem('fuel-management-user', JSON.stringify(dbUser))
+            setUser(dbUser)
+            return { success: true }
           }
 
-          setUser({ ...dbUser, id: signUpData.user.id })
+          const updatedUser = { ...dbUser, id: signUpData.user.id }
+          localStorage.setItem('fuel-management-user', JSON.stringify(updatedUser))
+          setUser(updatedUser)
           return { success: true }
         }
       }
@@ -157,6 +202,7 @@ export function AuthProvider({ children }) {
       const { error } = await supabase.auth.signOut()
       if (error) throw error
       setUser(null)
+      localStorage.removeItem('fuel-management-user')
       return { success: true }
     } catch (error) {
       return { success: false, error: error.message }

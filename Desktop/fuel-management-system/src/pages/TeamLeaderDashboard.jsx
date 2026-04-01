@@ -50,6 +50,37 @@ function CreateFuelPO() {
     setLoading(true)
 
     try {
+      // First, ensure user exists in users table
+      const { data: existingUser, error: checkError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', user.id)
+        .maybeSingle()
+
+      if (checkError) {
+        console.error('Error checking user:', checkError)
+        throw new Error('Failed to verify user. Please try again.')
+      }
+
+      if (!existingUser) {
+        console.log('User not found in database, creating record...', user)
+        // Create user record if doesn't exist
+        const { error: userError } = await supabase
+          .from('users')
+          .insert([{
+            id: user.id,
+            email: user.email,
+            name: user.name || user.email,
+            role: user.role || 'team_leader'
+          }])
+        
+        if (userError) {
+          console.error('Error creating user record:', userError)
+          throw new Error(`Failed to create user record: ${userError.message}. Please contact admin.`)
+        }
+        console.log('User record created successfully')
+      }
+
       // Generate unique QR code
       const qrCode = `QR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
       
@@ -63,16 +94,13 @@ function CreateFuelPO() {
           vehicle_type: formData.vehicle_type,
           fuel_type: formData.fuel_type,
           liters: formData.liters,
-          created_by: user?.id,
+          created_by: user.id,
           qr_code: qrCode,
           status: 'unused',
           expires_at: expiresAt,
           notes: formData.notes
         }])
-        .select(`
-          *,
-          vehicles (plate_number, driver_name)
-        `)
+        .select()
         .single()
 
       if (error) throw error
@@ -113,7 +141,7 @@ function CreateFuelPO() {
     if (!generatedQR) return ''
     return JSON.stringify({
       request_id: generatedQR.id,
-      vehicle: generatedQR.vehicles?.plate_number,
+      vehicle_type: generatedQR.vehicle_type,
       fuel_type: generatedQR.fuel_type,
       liters: generatedQR.liters,
       status: generatedQR.status,
@@ -246,10 +274,9 @@ function CreateFuelPO() {
               />
               
               <div className="mt-6 text-center">
-                <p className="font-bold text-lg text-gray-900">{generatedQR.vehicles?.plate_number}</p>
-                <p className="text-gray-600">{generatedQR.fuel_type} - {generatedQR.liters} Liters</p>
-                <p className="text-sm text-gray-500 mt-2">Driver: {generatedQR.vehicles?.driver_name}</p>
-                <p className="text-xs text-gray-400 mt-4 font-mono">{generatedQR.qr_code}</p>
+                <p className="font-bold text-lg text-gray-900">{generatedQR.vehicle_type?.replace('_', ' ')?.toUpperCase()}</p>
+                <p className="text-gray-600 mt-1">{generatedQR.fuel_type} - {generatedQR.liters}L</p>
+                <p className="text-sm text-gray-500 mt-2">QR Code: {generatedQR.qr_code}</p>
                 <p className="text-xs text-red-500 mt-2">Expires: {format(new Date(generatedQR.expires_at), 'MMM dd, yyyy HH:mm')}</p>
               </div>
 

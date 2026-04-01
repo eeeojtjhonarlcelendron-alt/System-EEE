@@ -29,7 +29,7 @@ function Layout({ children }) {
         <div className="p-6 border-b">
           <h1 className="text-xl font-bold text-primary-600 flex items-center gap-2">
             <Fuel className="w-6 h-6" />
-            Fuel Manager
+            Fuel Management 
           </h1>
         </div>
 

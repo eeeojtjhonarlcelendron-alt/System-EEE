@@ -9,6 +9,8 @@ function UsersManagement() {
   const [showModal, setShowModal] = useState(false)
   const [editingUser, setEditingUser] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
+  const [countdown, setCountdown] = useState(0)
+  const RATE_LIMIT_SECONDS = 180 // 3 minutes for users who hit limit multiple times
 
   const [formData, setFormData] = useState({
     name: '',
@@ -20,6 +22,14 @@ function UsersManagement() {
   useEffect(() => {
     fetchUsers()
   }, [])
+
+  // Countdown timer for rate limit
+  useEffect(() => {
+    if (countdown > 0) {
+      const timer = setTimeout(() => setCountdown(countdown - 1), 1000)
+      return () => clearTimeout(timer)
+    }
+  }, [countdown])
 
   const fetchUsers = async () => {
     try {
@@ -63,7 +73,8 @@ function UsersManagement() {
 
         if (authError) {
           if (authError.message.includes('rate limit') || authError.status === 429) {
-            throw new Error('Rate limit: Please wait 1 minute before creating another user')
+            setCountdown(RATE_LIMIT_SECONDS) // Start 3 minute countdown
+            throw new Error(`Rate limit reached. Please wait ${RATE_LIMIT_SECONDS} seconds (3 minutes) before creating another user. You've hit the limit multiple times.`)
           }
           throw new Error(`Auth error: ${authError.message}`)
         }
@@ -288,6 +299,11 @@ function UsersManagement() {
                     placeholder="Min 6 characters"
                   />
                   <p className="text-xs text-gray-500 mt-1">User will login with this password</p>
+                  {countdown > 0 && (
+                    <p className="text-xs text-orange-600 mt-1 font-bold">
+                      ⏳ Wait {Math.floor(countdown / 60)}m {countdown % 60}s before creating another user
+                    </p>
+                  )}
                 </div>
               )}
               <div className="flex gap-3 mt-6">
@@ -300,7 +316,12 @@ function UsersManagement() {
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+                  disabled={!editingUser && countdown > 0}
+                  className={`flex-1 px-4 py-2 rounded-lg ${
+                    !editingUser && countdown > 0
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-primary-600 hover:bg-primary-700 text-white'
+                  }`}
                 >
                   {editingUser ? 'Update' : 'Create'}
                 </button>

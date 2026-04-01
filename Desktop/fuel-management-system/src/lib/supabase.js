@@ -3,7 +3,15 @@ import { createClient } from '@supabase/supabase-js'
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'your-supabase-url'
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'your-supabase-key'
 
-export const supabase = createClient(supabaseUrl, supabaseKey)
+export const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: false,
+    storageKey: 'fuel-management-auth',
+    storage: localStorage
+  }
+})
 
 // Database Schema Setup (to be run in Supabase SQL Editor)
 export const setupDatabase = async () => {
